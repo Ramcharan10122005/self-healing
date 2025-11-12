@@ -6,8 +6,41 @@ import signal
 import subprocess
 from datetime import datetime
 
+# Import new feature modules
+try:
+    from email_notifier import send_violation_email, send_restart_failed_email, send_anomaly_email, send_zombie_email
+except ImportError:
+    # Fallback if modules not available
+    def send_violation_email(*args, **kwargs): return False
+    def send_restart_failed_email(*args, **kwargs): return False
+    def send_anomaly_email(*args, **kwargs): return False
+    def send_zombie_email(*args, **kwargs): return False
+
+try:
+    from cooldown_manager import is_in_cooldown, track_restart, reset_cooldown, get_cooldown_status
+except ImportError:
+    def is_in_cooldown(*args, **kwargs): return False
+    def track_restart(*args, **kwargs): pass
+    def reset_cooldown(*args, **kwargs): pass
+    def get_cooldown_status(*args, **kwargs): return {'in_cooldown': False}
+
+try:
+    from anomaly_detector import detect_anomalies, cleanup_history
+except ImportError:
+    def detect_anomalies(*args, **kwargs): return []
+    def cleanup_history(*args, **kwargs): pass
+
+try:
+    from zombie_manager import scan_zombies, get_zombie_count, cleanup_zombies
+except ImportError:
+    def scan_zombies(*args, **kwargs): return []
+    def get_zombie_count(*args, **kwargs): return 0
+    def cleanup_zombies(*args, **kwargs): return {}
+
 PROCESS_LIST_FILE = 'process_list.txt'
 LOG_FILE = 'healing.log'
+ZOMBIE_CHECK_INTERVAL = 300  # Check for zombies every 5 minutes
+last_zombie_check = 0
 
 
 def log_action(action: str, process_name: str, pid: int | None, reason: str) -> None:
@@ -223,9 +256,29 @@ def start_process(name: str) -> int | None:
 
 
 def main() -> None:
+    global last_zombie_check
     log_action('Resource Monitor', 'monitor.py', os.getpid(), 'started')
+    
     while True:
         processes = read_process_list()
+        
+        # Periodic zombie check
+        current_time = time.time()
+        if current_time - last_zombie_check >= ZOMBIE_CHECK_INTERVAL:
+            try:
+                zombie_count = get_zombie_count()
+                if zombie_count > 0:
+                    zombies = scan_zombies()
+                    log_action('Zombie Alert', 'system', 0, f'{zombie_count} zombie process(es) detected')
+                    send_zombie_email(zombie_count, f"Found {zombie_count} zombie processes")
+                    # Attempt cleanup
+                    cleanup_results = cleanup_zombies()
+                    if cleanup_results.get('reaped', 0) > 0:
+                        log_action('Zombie Cleanup', 'system', 0, f"Reaped {cleanup_results['reaped']} zombie(s)")
+            except Exception:
+                pass
+            last_zombie_check = current_time
+        
         for name, limits in processes.items():
             pid = find_pid_by_name(name)
             if pid is None:
@@ -234,33 +287,112 @@ def main() -> None:
                 # Python monitor only handles resource limit monitoring
                 continue
             
+            # Process exists - run anomaly detection first
+            try:
+                anomalies = detect_anomalies(pid, name)
+                if anomalies:
+                    # Handle anomalies
+                    for anomaly in anomalies:
+                        log_action('Anomaly', name, pid, f"{anomaly['type']}: {anomaly['message']}")
+                        send_anomaly_email(name, pid, anomaly['type'], anomaly.get('message', ''))
+                        
+                        # Take action based on anomaly type
+                        if anomaly['type'] == 'fork_bomb':
+                            # Critical - kill immediately
+                            log_action('Killed', name, pid, f"fork bomb detected ({anomaly.get('child_count', 0)} children)")
+                            kill_process(pid)
+                            cleanup_history(pid)
+                            continue  # Skip resource checks
+                        elif anomaly['type'] == 'memory_leak':
+                            # High severity - restart
+                            log_action('Killed', name, pid, f"memory leak detected ({anomaly.get('increase_mb', 0):.1f}MB increase)")
+                            kill_process(pid)
+                            cleanup_history(pid)
+                            # Will restart below (if not in cooldown)
+                        elif anomaly['type'] == 'zombie':
+                            # Medium - try to reap
+                            log_action('Zombie', name, pid, 'zombie process detected')
+                            cleanup_history(pid)
+                            continue  # Skip resource checks
+                        elif anomaly['type'] == 'cpu_spike':
+                            # Medium - log and continue monitoring
+                            log_action('CPU Spike', name, pid, f"CPU spike: {anomaly.get('current_cpu', 0):.1f}%")
+                            # Continue to resource checks
+            except Exception:
+                pass  # Don't break monitoring if anomaly detection fails
+            
             # Process exists - check resource usage
             # Python monitor only handles resource limit monitoring
             # C monitor handles crash detection and restarting
             cpu, mem = get_usage(pid)
             if cpu is None or mem is None:
                 # Process doesn't exist or is inaccessible - skip (C monitor will handle it)
+                cleanup_history(pid)  # Clean up tracking data
                 continue
             
             # Check resource limits
             if cpu > limits['cpu']:
+                # Check cooldown before restarting
+                if is_in_cooldown(name):
+                    log_action('Cooldown', name, pid, 'too many restarts, cooling down')
+                    continue
+                
                 log_action('Killed', name, pid, f'due to high CPU usage ({cpu:.1f}% > {limits["cpu"]}%)')
                 kill_process(pid)
                 log_action('Stopped', name, pid, 'terminated by monitor')
+                
+                # Track restart attempt
+                track_restart(name)
+                
+                # Check cooldown again (might have been activated by track_restart)
+                if is_in_cooldown(name):
+                    log_action('Cooldown', name, 0, 'cooldown activated after restart tracking')
+                    send_restart_failed_email(name, 'Process entered cooldown due to excessive restarts')
+                    continue
+                
                 new_pid = start_process(name)
                 if new_pid:
                     log_action('Restarted', name, new_pid, 'after high CPU usage')
+                    send_violation_email(name, pid, 'CPU', cpu, limits['cpu'])
                 else:
                     log_action('Restart failed', name, 0, 'unable to restart after CPU kill')
+                    send_restart_failed_email(name, 'Unable to restart after CPU violation')
             elif mem > limits['mem']:
+                # Check cooldown before restarting
+                if is_in_cooldown(name):
+                    log_action('Cooldown', name, pid, 'too many restarts, cooling down')
+                    continue
+                
                 log_action('Killed', name, pid, f'due to high memory usage ({mem:.1f}MB > {limits["mem"]}MB)')
                 kill_process(pid)
                 log_action('Stopped', name, pid, 'terminated by monitor')
+                
+                # Track restart attempt
+                track_restart(name)
+                
+                # Check cooldown again (might have been activated by track_restart)
+                if is_in_cooldown(name):
+                    log_action('Cooldown', name, 0, 'cooldown activated after restart tracking')
+                    send_restart_failed_email(name, 'Process entered cooldown due to excessive restarts')
+                    continue
+                
                 new_pid = start_process(name)
                 if new_pid:
                     log_action('Restarted', name, new_pid, 'after high memory usage')
+                    send_violation_email(name, pid, 'Memory', mem, limits['mem'])
                 else:
                     log_action('Restart failed', name, 0, 'unable to restart after memory kill')
+                    send_restart_failed_email(name, 'Unable to restart after memory violation')
+            else:
+                # Process is healthy - reset cooldown if it was in cooldown
+                # (This allows recovery after cooldown period)
+                status = get_cooldown_status(name)
+                if status.get('in_cooldown', False):
+                    # Check if cooldown period has expired
+                    if status.get('cooldown_remaining', 0) <= 0:
+                        reset_cooldown(name)
+                        log_action('Cooldown Reset', name, pid, 'process stable, cooldown reset')
+        
         time.sleep(5)
 
 

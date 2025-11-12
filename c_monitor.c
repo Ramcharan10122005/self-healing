@@ -19,9 +19,15 @@
 #define MAX_PROCESS_NAME 128
 #define LOG_FILE "healing.log"
 #define PROCESS_LIST_FILE "process_list.txt"
+#define HELPER_SCRIPT "c_monitor_helper.py"
 
 // Forward declarations
 static pid_t find_pid_by_name(const char* process_name);
+static int check_cooldown(const char* process_name);
+static void track_restart_c(const char* process_name);
+static int check_cooldown_after_track(const char* process_name);
+static void send_email_crash(const char* process_name, pid_t pid, const char* reason);
+static void send_email_restart_failed(const char* process_name, const char* reason);
 
 typedef struct {
     char name[MAX_PROCESS_NAME];
@@ -541,6 +547,52 @@ static void handle_signal(int sig) {
     }
 }
 
+// Helper function to call Python helper script
+static int call_helper_script(const char* action, const char* arg1, const char* arg2) {
+    char cmd[512];
+    if (arg2) {
+        snprintf(cmd, sizeof(cmd), "python3 %s %s %s %s 2>/dev/null", HELPER_SCRIPT, action, arg1, arg2);
+    } else if (arg1) {
+        snprintf(cmd, sizeof(cmd), "python3 %s %s %s 2>/dev/null", HELPER_SCRIPT, action, arg1);
+    } else {
+        snprintf(cmd, sizeof(cmd), "python3 %s %s 2>/dev/null", HELPER_SCRIPT, action);
+    }
+    return system(cmd);
+}
+
+// Check if process is in cooldown
+static int check_cooldown(const char* process_name) {
+    int result = call_helper_script("check_cooldown", process_name, NULL);
+    return (result == 0) ? 0 : 1;  // Returns 1 if in cooldown, 0 if not
+}
+
+// Track restart attempt
+static void track_restart_c(const char* process_name) {
+    call_helper_script("track_restart", process_name, NULL);
+}
+
+// Track restart and check if cooldown was activated
+static int check_cooldown_after_track(const char* process_name) {
+    int result = call_helper_script("check_cooldown_after_track", process_name, NULL);
+    return (result == 0) ? 0 : 1;  // Returns 1 if in cooldown, 0 if not
+}
+
+// Send email for crash
+static void send_email_crash(const char* process_name, pid_t pid, const char* reason) {
+    char pid_str[32];
+    snprintf(pid_str, sizeof(pid_str), "%d", (int)pid);
+    call_helper_script("email_crash", process_name, pid_str);
+    if (reason) {
+        // Note: reason is not passed to helper script in this simple implementation
+        // Could be enhanced to pass reason as third argument
+    }
+}
+
+// Send email for restart failure
+static void send_email_restart_failed(const char* process_name, const char* reason) {
+    call_helper_script("email_restart_failed", process_name, reason);
+}
+
 int main(int argc, char* argv[]) {
     signal(SIGTERM, handle_signal);
     signal(SIGINT, handle_signal);
@@ -604,15 +656,37 @@ int main(int argc, char* argv[]) {
                     if (should_restart) {
                         // Process crashed with crash signal (SIGSEGV, SIGABRT, etc.) - restart
                         log_action("Stopped", processes[i].name, processes[i].pid, "process crashed (crash signal detected)");
-
-                    log_action("Detected crash", processes[i].name, processes[i].pid, "");
+                        log_action("Detected crash", processes[i].name, processes[i].pid, "");
+                        
+                        // Send email notification
+                        send_email_crash(processes[i].name, processes[i].pid, "crash signal detected");
+                        
+                        // Check cooldown before restarting
+                        if (check_cooldown(processes[i].name)) {
+                            log_action("Cooldown", processes[i].name, 0, "too many restarts, cooling down");
+                            processes[i].exited_normally = 0;
+                            continue;
+                        }
+                        
                         processes[i].exited_normally = 0;  // Reset flag - this was a crash
-                    processes[i].pid = start_process(processes[i].name);
-                    processes[i].is_running = (processes[i].pid > 0);
+                        
+                        // Track restart attempt
+                        track_restart_c(processes[i].name);
+                        
+                        // Check if cooldown was activated
+                        if (check_cooldown_after_track(processes[i].name)) {
+                            log_action("Cooldown", processes[i].name, 0, "cooldown activated after restart tracking");
+                            send_email_restart_failed(processes[i].name, "Process entered cooldown due to excessive restarts");
+                            continue;
+                        }
+                        
+                        processes[i].pid = start_process(processes[i].name);
+                        processes[i].is_running = (processes[i].pid > 0);
                         if (processes[i].is_running) {
                             log_action("Restarted", processes[i].name, processes[i].pid, "after crash signal");
                         } else {
                             log_action("Restart failed", processes[i].name, 0, "unable to start process");
+                            send_email_restart_failed(processes[i].name, "Unable to start process after crash");
                         }
                     } else {
                         // Normal exit, window closed, or killed with SIGTERM/SIGKILL - don't restart
@@ -664,13 +738,36 @@ int main(int argc, char* argv[]) {
                             // Crash signal - restart it
                             log_action("Stopped", processes[i].name, old_pid, "process crashed (crash signal detected)");
                             log_action("Detected crash", processes[i].name, old_pid, "");
+                            
+                            // Send email notification
+                            send_email_crash(processes[i].name, old_pid, "crash signal detected");
+                            
+                            // Check cooldown before restarting
+                            if (check_cooldown(processes[i].name)) {
+                                log_action("Cooldown", processes[i].name, 0, "too many restarts, cooling down");
+                                processes[i].exited_normally = 0;
+                                continue;
+                            }
+                            
                             processes[i].exited_normally = 0;
-                processes[i].pid = start_process(processes[i].name);
-                processes[i].is_running = (processes[i].pid > 0);
+                            
+                            // Track restart attempt
+                            track_restart_c(processes[i].name);
+                            
+                            // Check if cooldown was activated
+                            if (check_cooldown_after_track(processes[i].name)) {
+                                log_action("Cooldown", processes[i].name, 0, "cooldown activated after restart tracking");
+                                send_email_restart_failed(processes[i].name, "Process entered cooldown due to excessive restarts");
+                                continue;
+                            }
+                            
+                            processes[i].pid = start_process(processes[i].name);
+                            processes[i].is_running = (processes[i].pid > 0);
                             if (processes[i].is_running) {
                                 log_action("Restarted", processes[i].name, processes[i].pid, "after crash signal");
                             } else {
                                 log_action("Restart failed", processes[i].name, 0, "unable to start process");
+                                send_email_restart_failed(processes[i].name, "Unable to start process after crash");
                             }
                             continue;
                         }

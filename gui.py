@@ -7,6 +7,21 @@ import subprocess
 import signal
 import time
 
+# Import new feature modules
+try:
+    from cooldown_manager import get_all_cooldown_status, get_cooldown_status
+    from zombie_manager import scan_zombies, get_zombie_count, cleanup_zombies
+    from anomaly_detector import detect_anomalies, get_anomaly_summary
+except ImportError:
+    # Fallback if modules not available
+    def get_all_cooldown_status(*args, **kwargs): return {}
+    def get_cooldown_status(*args, **kwargs): return {'in_cooldown': False}
+    def scan_zombies(*args, **kwargs): return []
+    def get_zombie_count(*args, **kwargs): return 0
+    def cleanup_zombies(*args, **kwargs): return {}
+    def detect_anomalies(*args, **kwargs): return []
+    def get_anomaly_summary(*args, **kwargs): return {}
+
 PROCESS_LIST_FILE = 'process_list.txt'
 LOG_FILE = 'healing.log'
 REFRESH_MS = 3000
@@ -30,28 +45,86 @@ class App:
         title = ttk.Label(main, text='Self-Healing Process Manager', font=('Arial', 16, 'bold'))
         title.pack(pady=(0, 10))
 
-        content = ttk.Frame(main)
-        content.pack(fill=tk.BOTH, expand=True)
+        # Create notebook for tabs
+        self.notebook = ttk.Notebook(main)
+        self.notebook.pack(fill=tk.BOTH, expand=True)
+
+        # Tab 1: Processes
+        tab1 = ttk.Frame(self.notebook, padding=10)
+        self.notebook.add(tab1, text='Processes')
+        
+        content1 = ttk.Frame(tab1)
+        content1.pack(fill=tk.BOTH, expand=True)
 
         # Left: process table
-        left = ttk.LabelFrame(content, text='Processes', padding=10)
+        left = ttk.LabelFrame(content1, text='Processes', padding=10)
         left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        cols = ('Process', 'PID', 'Status', 'CPU %', 'Memory MB')
+        cols = ('Process', 'PID', 'Status', 'CPU %', 'Memory MB', 'Cooldown')
         self.tree = ttk.Treeview(left, columns=cols, show='headings')
         for c in cols:
             self.tree.heading(c, text=c)
-            self.tree.column(c, width=120)
+            self.tree.column(c, width=100)
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scroll = ttk.Scrollbar(left, orient='vertical', command=self.tree.yview)
         self.tree.configure(yscrollcommand=scroll.set)
         scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
         # Right: log
-        right = ttk.LabelFrame(content, text='Healing Log', padding=10)
+        right = ttk.LabelFrame(content1, text='Healing Log', padding=10)
         right.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
         self.log = tk.Text(right, height=30, width=50, bg='#1e1e1e', fg='#ffffff')
         self.log.pack(fill=tk.BOTH, expand=True)
+
+        # Tab 2: Anomalies
+        tab2 = ttk.Frame(self.notebook, padding=10)
+        self.notebook.add(tab2, text='Anomalies')
+        
+        anomaly_frame = ttk.LabelFrame(tab2, text='Detected Anomalies', padding=10)
+        anomaly_frame.pack(fill=tk.BOTH, expand=True)
+        
+        anomaly_cols = ('Process', 'PID', 'Type', 'Severity', 'Message')
+        self.anomaly_tree = ttk.Treeview(anomaly_frame, columns=anomaly_cols, show='headings')
+        for c in anomaly_cols:
+            self.anomaly_tree.heading(c, text=c)
+            self.anomaly_tree.column(c, width=150)
+        self.anomaly_tree.pack(fill=tk.BOTH, expand=True)
+
+        # Tab 3: Zombies
+        tab3 = ttk.Frame(self.notebook, padding=10)
+        self.notebook.add(tab3, text='Zombies')
+        
+        zombie_frame = ttk.LabelFrame(tab3, text='Zombie Processes', padding=10)
+        zombie_frame.pack(fill=tk.BOTH, expand=True)
+        
+        zombie_cols = ('PID', 'Name', 'Parent PID', 'Parent Name', 'Age')
+        self.zombie_tree = ttk.Treeview(zombie_frame, columns=zombie_cols, show='headings')
+        for c in zombie_cols:
+            self.zombie_tree.heading(c, text=c)
+            self.zombie_tree.column(c, width=120)
+        self.zombie_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        zombie_controls = ttk.Frame(zombie_frame)
+        zombie_controls.pack(side=tk.RIGHT, fill=tk.Y, padx=10)
+        ttk.Button(zombie_controls, text='Cleanup Zombies', command=self._cleanup_zombies).pack(pady=5)
+        ttk.Button(zombie_controls, text='Refresh', command=self._refresh_zombies).pack(pady=5)
+        
+        self.zombie_count_label = ttk.Label(zombie_frame, text='Zombie Count: 0', font=('Arial', 12, 'bold'))
+        self.zombie_count_label.pack(pady=5)
+
+        # Tab 4: Cooldown Status
+        tab4 = ttk.Frame(self.notebook, padding=10)
+        self.notebook.add(tab4, text='Cooldown')
+        
+        cooldown_frame = ttk.LabelFrame(tab4, text='Cooldown Status', padding=10)
+        cooldown_frame.pack(fill=tk.BOTH, expand=True)
+        
+        cooldown_cols = ('Process', 'In Cooldown', 'Restart Count', 'Cooldown Remaining (s)')
+        self.cooldown_tree = ttk.Treeview(cooldown_frame, columns=cooldown_cols, show='headings')
+        for c in cooldown_cols:
+            self.cooldown_tree.heading(c, text=c)
+            self.cooldown_tree.column(c, width=150)
+        self.cooldown_tree.pack(fill=tk.BOTH, expand=True)
 
         # Controls
         controls = ttk.Frame(main)
@@ -123,12 +196,103 @@ class App:
                 cfg['status'] = 'Not Running'
                 cfg['cpu_pct'] = 0.0
                 cfg['mem_mb'] = 0.0
+            
+            # Get cooldown status
+            try:
+                cooldown_status = get_cooldown_status(name)
+                cfg['cooldown'] = 'Yes' if cooldown_status.get('in_cooldown', False) else 'No'
+            except Exception:
+                cfg['cooldown'] = 'No'
 
     def _refresh_table(self) -> None:
         for i in self.tree.get_children():
             self.tree.delete(i)
         for name, cfg in self.processes.items():
-            self.tree.insert('', 'end', values=(name, cfg['pid'] or 'N/A', cfg['status'], f"{cfg['cpu_pct']:.1f}", f"{cfg['mem_mb']:.1f}"))
+            self.tree.insert('', 'end', values=(
+                name, 
+                cfg['pid'] or 'N/A', 
+                cfg['status'], 
+                f"{cfg['cpu_pct']:.1f}", 
+                f"{cfg['mem_mb']:.1f}",
+                cfg.get('cooldown', 'No')
+            ))
+    
+    def _refresh_anomalies(self) -> None:
+        for i in self.anomaly_tree.get_children():
+            self.anomaly_tree.delete(i)
+        
+        try:
+            all_anomalies = []
+            for name, cfg in self.processes.items():
+                pid = cfg.get('pid')
+                if pid:
+                    anomalies = detect_anomalies(pid, name)
+                    for anomaly in anomalies:
+                        all_anomalies.append({
+                            'process': name,
+                            'pid': pid,
+                            'type': anomaly.get('type', 'unknown'),
+                            'severity': anomaly.get('severity', 'medium'),
+                            'message': anomaly.get('message', '')
+                        })
+            
+            for anomaly in all_anomalies:
+                self.anomaly_tree.insert('', 'end', values=(
+                    anomaly['process'],
+                    anomaly['pid'],
+                    anomaly['type'],
+                    anomaly['severity'],
+                    anomaly['message'][:50]  # Truncate long messages
+                ))
+        except Exception:
+            pass
+    
+    def _refresh_zombies(self) -> None:
+        for i in self.zombie_tree.get_children():
+            self.zombie_tree.delete(i)
+        
+        try:
+            zombies = scan_zombies()
+            self.zombie_count_label.config(text=f'Zombie Count: {len(zombies)}')
+            
+            for z in zombies:
+                self.zombie_tree.insert('', 'end', values=(
+                    z['pid'],
+                    z['name'],
+                    z['ppid'],
+                    z['parent_name'],
+                    z['age_formatted']
+                ))
+        except Exception:
+            self.zombie_count_label.config(text='Zombie Count: Error')
+    
+    def _cleanup_zombies(self) -> None:
+        try:
+            results = cleanup_zombies()
+            messagebox.showinfo('Zombie Cleanup', 
+                              f"Reaped: {results.get('reaped', 0)}\n"
+                              f"Failed: {results.get('failed', 0)}\n"
+                              f"Skipped: {results.get('skipped', 0)}")
+            self._refresh_zombies()
+        except Exception as e:
+            messagebox.showerror('Error', f'Failed to cleanup zombies: {e}')
+    
+    def _refresh_cooldown(self) -> None:
+        for i in self.cooldown_tree.get_children():
+            self.cooldown_tree.delete(i)
+        
+        try:
+            all_status = get_all_cooldown_status()
+            for process_name, status in all_status.items():
+                if status.get('restart_count', 0) > 0 or status.get('in_cooldown', False):
+                    self.cooldown_tree.insert('', 'end', values=(
+                        process_name,
+                        'Yes' if status.get('in_cooldown', False) else 'No',
+                        status.get('restart_count', 0),
+                        status.get('cooldown_remaining', 0)
+                    ))
+        except Exception:
+            pass
 
     def _refresh_log(self) -> None:
         if not os.path.exists(LOG_FILE):
@@ -144,6 +308,9 @@ class App:
         self._update_processes()
         self._refresh_table()
         self._refresh_log()
+        self._refresh_anomalies()
+        self._refresh_zombies()
+        self._refresh_cooldown()
         self.root.after(REFRESH_MS, self._refresh)
 
     def _add_process(self) -> None:
