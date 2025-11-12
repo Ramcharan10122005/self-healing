@@ -1,0 +1,255 @@
+Self-Healing Process Manager - Code Flow Diagram
+================================================
+
+1. SYSTEM STARTUP FLOW
+======================
+
+heal.sh start
+    │
+    ├─ check_deps() → Verify gcc, python3, psutil, tkinter
+    │
+    ├─ ensure_process_list() → Create default process_list.txt
+    │
+    ├─ stop_all() → Clean up any existing processes
+    │
+    ├─ build() → Compile c_monitor.c
+    │
+    ├─ start_c_monitor() → Launch C daemon with --no-daemon
+    │   │
+    │   └─ c_monitor main()
+    │       │
+    │       ├─ Parse command line (--no-daemon flag)
+    │       │
+    │       ├─ Setup signal handlers (SIGTERM, SIGINT)
+    │       │
+    │       └─ Main monitoring loop:
+    │           │
+    │           ├─ parse_process_list() → Read process_list.txt
+    │           │
+    │           ├─ For each process:
+    │           │   │
+    │           │   ├─ check_process_exists(pid) → kill(pid, 0)
+    │           │   │
+    │           │   └─ If crashed: start_process() → fork() + execvp()
+    │           │
+    │           └─ sleep(5) → Wait 5 seconds
+    │
+    ├─ start_python_monitor() → Launch Python resource monitor
+    │   │
+    │   └─ monitor.py main()
+    │       │
+    │       └─ Main monitoring loop:
+    │           │
+    │           ├─ read_process_list() → Parse process_list.txt
+    │           │
+    │           ├─ For each process:
+    │           │   │
+    │           │   ├─ find_pid_by_name() → psutil.process_iter()
+    │           │   │
+    │           │   ├─ get_usage(pid) → psutil.Process(pid)
+    │           │   │
+    │           │   ├─ Check CPU limit: cpu > limits['cpu']
+    │           │   │   │
+    │           │   │   └─ kill_process() → SIGTERM → SIGKILL
+    │           │   │
+    │           │   ├─ Check memory limit: mem > limits['mem']
+    │           │   │   │
+    │           │   │   └─ kill_process() → SIGTERM → SIGKILL
+    │           │   │
+    │           │   └─ start_process() → subprocess.Popen()
+    │           │
+    │           └─ sleep(5) → Wait 5 seconds
+    │
+    └─ start_gui() → Launch Tkinter GUI
+        │
+        └─ gui.py App.__init__()
+            │
+            ├─ _build_ui() → Create GUI components
+            │   │
+            │   ├─ Process table (Treeview)
+            │   │
+            │   ├─ Log viewer (Text widget)
+            │   │
+            │   └─ Control buttons
+            │
+            ├─ _load_process_list() → Load initial processes
+            │
+            └─ _refresh() → Start auto-refresh loop
+                │
+                └─ Every 3 seconds:
+                    │
+                    ├─ _update_processes() → Get live process data
+                    │
+                    ├─ _refresh_table() → Update process table
+                    │
+                    ├─ _refresh_log() → Update log display
+                    │
+                    └─ root.after(3000, _refresh) → Schedule next refresh
+
+2. PROCESS CRASH DETECTION FLOW
+===============================
+
+Process Crashes
+    │
+    ├─ C Monitor detects:
+    │   │
+    │   ├─ check_process_exists(pid) → kill(pid, 0) returns -1
+    │   │
+    │   ├─ log_action("Detected crash", name, pid, "")
+    │   │
+    │   ├─ start_process(name) → fork() + execvp()
+    │   │
+    │   └─ log_action("Restarted process", name, new_pid, "after crash")
+    │
+    └─ Python Monitor detects:
+        │
+        ├─ find_pid_by_name(name) → returns None
+        │
+        ├─ log_action("Started", name, new_pid, "process not found")
+        │
+        └─ start_process(name) → subprocess.Popen()
+
+3. RESOURCE VIOLATION FLOW
+==========================
+
+Resource Violation Detected
+    │
+    └─ Python Monitor:
+        │
+        ├─ get_usage(pid) → psutil.Process(pid)
+        │   │
+        │   ├─ cpu = p.cpu_percent(interval=0.5)
+        │   │
+        │   └─ mem_mb = p.memory_info().rss / (1024 * 1024)
+        │
+        ├─ Check CPU limit: cpu > limits['cpu']
+        │   │
+        │   ├─ log_action("Killed", name, pid, "due to high CPU usage")
+        │   │
+        │   ├─ kill_process(pid) → SIGTERM → sleep(1) → SIGKILL
+        │   │
+        │   ├─ start_process(name) → subprocess.Popen()
+        │   │
+        │   └─ log_action("Restarted", name, new_pid, "after high CPU usage")
+        │
+        └─ Check memory limit: mem > limits['mem']
+            │
+            ├─ log_action("Killed", name, pid, "due to high memory usage")
+            │
+            ├─ kill_process(pid) → SIGTERM → sleep(1) → SIGKILL
+            │
+            ├─ start_process(name) → subprocess.Popen()
+            │
+            └─ log_action("Restarted", name, new_pid, "after high memory usage")
+
+4. GUI INTERACTION FLOW
+=======================
+
+User Action in GUI
+    │
+    ├─ Add Process:
+    │   │
+    │   ├─ _add_process() → Create dialog window
+    │   │
+    │   ├─ User enters: name, cpu_limit, mem_limit
+    │   │
+    │   ├─ _save_process_list() → Write to process_list.txt
+    │   │
+    │   └─ _refresh() → Update display
+    │
+    ├─ Remove Process:
+    │   │
+    │   ├─ _remove_process() → Get selected process
+    │   │
+    │   ├─ processes.pop(name) → Remove from dict
+    │   │
+    │   ├─ _save_process_list() → Write to process_list.txt
+    │   │
+    │   └─ _refresh() → Update display
+    │
+    └─ Force Restart:
+        │
+        ├─ _force_restart() → Get selected process
+        │
+        ├─ os.kill(pid, SIGTERM) → Graceful termination
+        │
+        ├─ sleep(0.5) → Wait for cleanup
+        │
+        ├─ os.kill(pid, SIGKILL) → Force kill if needed
+        │
+        ├─ subprocess.Popen([name]) → Restart process
+        │
+        └─ _refresh() → Update display
+
+5. LOGGING FLOW
+===============
+
+All Components Write to healing.log
+    │
+    ├─ C Monitor:
+    │   │
+    │   ├─ log_action("Daemon", "c_monitor", getpid(), "started")
+    │   │
+    │   ├─ log_action("Detected crash", name, pid, "")
+    │   │
+    │   └─ log_action("Restarted process", name, new_pid, "after crash")
+    │
+    ├─ Python Monitor:
+    │   │
+    │   ├─ log_action("Resource Monitor", "monitor.py", getpid(), "started")
+    │   │
+    │   ├─ log_action("Killed", name, pid, "due to high CPU usage")
+    │   │
+    │   └─ log_action("Restarted", name, new_pid, "after high CPU usage")
+    │
+    └─ GUI:
+        │
+        └─ _refresh_log() → Read and display log entries
+
+6. SHUTDOWN FLOW
+================
+
+heal.sh stop
+    │
+    └─ stop_all()
+        │
+        ├─ Read selfhealer.pid file
+        │
+        ├─ For each PID in file:
+        │   │
+        │   ├─ kill -0 pid → Check if process exists
+        │   │
+        │   ├─ kill pid → Send SIGTERM
+        │   │
+        │   ├─ sleep 1 → Wait for graceful shutdown
+        │   │
+        │   └─ kill -9 pid → Force kill if needed
+        │
+        ├─ Remove selfhealer.pid file
+        │
+        └─ pkill fallback cleanup
+
+KEY DATA STRUCTURES
+===================
+
+C Monitor:
+- ProcessInfo struct: name, cpu_limit, memory_limit_mb, pid, is_running
+- processes[64] array: Fixed-size array of ProcessInfo
+- process_count: Number of active processes
+
+Python Monitor:
+- processes dict: {name: {cpu: int, mem: int}}
+- limits dict: Resource limits per process
+- pid: Current process ID
+
+GUI:
+- self.processes dict: {name: {cpu, mem, pid, status, cpu_pct, mem_mb}}
+- tree: Treeview widget for process table
+- log: Text widget for log display
+
+Shell Script:
+- PID_FILE: "selfhealer.pid" - stores component PIDs
+- LOG_FILE: "healing.log" - centralized logging
+- PROCESS_LIST_FILE: "process_list.txt" - process configuration
+
+

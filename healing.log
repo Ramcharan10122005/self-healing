@@ -1,0 +1,23 @@
+[2025-11-13 02:10] Daemon c_monitor (PID 32695) shutting down
+[2025-11-13 02:10] Daemon c_monitor (PID 32989) started
+[2025-11-13 02:10] Adopted gedit (PID 32819) found existing process
+[2025-11-13 02:10] Resource Monitor monitor.py (PID 32996) started
+[2025-11-13 02:10] Exit detected gedit (PID 32819) process disappeared without zombie state (assumed normal exit)
+[2025-11-13 02:10] Stopped gedit (PID 32819) normal exit or normal kill - not restarting
+[2025-11-13 02:10] Started gedit (PID 33090) initial start
+[2025-11-13 02:10] Exit detected gedit (PID 33090) normal exit (exit code 0)
+[2025-11-13 02:10] Stopped gedit (PID 33090) normal exit or normal kill - not restarting
+[2025-11-13 02:11] Adopted gedit (PID 33233) user manually started after normal exit
+[2025-11-13 02:12] Daemon c_monitor (PID 32989) shutting down
+[2025-11-13 02:12] Daemon c_monitor (PID 33528) started
+[2025-11-13 02:12] Resource Monitor monitor.py (PID 33536) started
+[2025-11-13 02:12] Started gedit (PID 33554) initial start
+[2025-11-13 02:12] Exit detected gedit (PID 33554) normal exit (exit code 0)
+[2025-11-13 02:12] Stopped gedit (PID 33554) normal exit or normal kill - not restarting
+[2025-11-13 02:12] Started gedit (PID 33608) initial start
+[2025-11-13 02:13] Exit signal detected gedit (PID 33608) SIGSEGV
+[2025-11-13 02:13] Stopped gedit (PID 33608) process crashed (crash signal detected)
+[2025-11-13 02:13] Detected crash gedit (PID 33608) 
+[2025-11-13 02:13] Restarted gedit (PID 33705) after crash signal
+[2025-11-13 02:13] Exit detected gedit (PID 33705) normal exit (exit code 0)
+[2025-11-13 02:13] Stopped gedit (PID 33705) normal exit or normal kill - not restarting

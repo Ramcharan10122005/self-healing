@@ -1,0 +1,2 @@
+# process_name cpu_limit memory_limit_MB
+gedit 80 200
