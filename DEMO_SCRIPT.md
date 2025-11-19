@@ -65,6 +65,7 @@ kill -9 XXXX
 **Terminal 2:**
 ```bash
 # Install stress-ng if not available
+
 sudo apt install stress-ng
 
 # Start CPU stress test

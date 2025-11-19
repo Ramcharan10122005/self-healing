@@ -2,12 +2,12 @@
 # Set enabled=true to enable email notifications
 # Leave enabled=false to disable (default)
 
-enabled=false
+enabled=true
 smtp_server=smtp.gmail.com
 smtp_port=465
-sender_email=yourmail@gmail.com
-sender_password=your_app_password
-receiver_email=admin@gmail.com
+sender_email=kundenaramcharan@gmail.com
+sender_password=eyjl oedy unjk fpue
+receiver_email=202311047@diu.iiitvadodara.ac.in
 use_ssl=true
 
 # Note: For Gmail, you need to use an "App Password" not your regular password
